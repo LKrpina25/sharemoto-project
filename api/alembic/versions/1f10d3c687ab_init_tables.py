@@ -66,4 +66,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_users_email'), table_name='users')
     op.drop_table('users')
     op.drop_table('motorcycles')
+    op.execute('DROP TYPE reservation_status')
+    op.execute('DROP TYPE user_role')
+    op.execute('DROP TYPE motorcycle_status')
     # ### end Alembic commands ###

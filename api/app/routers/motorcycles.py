@@ -1,49 +1,26 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-import jwt
 
+from app.core.dependencies import get_current_user, require_admin
 from app.db.session import get_db
 from app.models.motorcycle import Motorcycle, MotorcycleStatus
-from app.models.user import User, UserRole
+from app.models.user import User
 from app.schemas.motorcycle import MotorcycleCreate, MotorcycleUpdate, MotorcycleResponse
-from app.core.config import settings
-from fastapi.security import OAuth2PasswordBearer
 
 router = APIRouter(prefix="/motorcycles", tags=["Motorcycles"])
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
-
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-    try:
-        # Dodajemo options={"verify_exp": False} kako freezegun ne bi rušio JWT tokene
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM], options={"verify_exp": False})
-        email: str = payload.get("sub")
-        if email is None:
-            raise HTTPException(status_code=401, detail="Nevažeći token.")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Nevažeći token.")
-
-    user = db.query(User).filter(User.email == email).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="Korisnik nije pronađen.")
-    return user
-
-
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != UserRole.ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Pristup dopušten samo administratorima.",
-        )
-    return current_user
 
 
 @router.get("/", response_model=list[MotorcycleResponse])
-def get_motorcycles(status_filter: MotorcycleStatus | None = None, db: Session = Depends(get_db)):
+def get_motorcycles(
+    status_filter: MotorcycleStatus | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
     query = db.query(Motorcycle)
     if status_filter:
         query = query.filter(Motorcycle.status == status_filter)
-    return query.all()
+    return query.order_by(Motorcycle.id).offset(offset).limit(limit).all()
 
 
 @router.get("/{motorcycle_id}", response_model=MotorcycleResponse)

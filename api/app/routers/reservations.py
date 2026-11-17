@@ -1,14 +1,15 @@
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
+from app.core.dependencies import get_current_user
+from app.core.exceptions import AppException
 from app.db.session import get_db
 from app.models.reservation import Reservation, ReservationStatus
 from app.models.motorcycle import Motorcycle, MotorcycleStatus
 from app.models.user import User
 from app.schemas.reservation import ReservationCreate, ReservationResponse
-from app.routers.motorcycles import get_current_user
 
 router = APIRouter(prefix="/reservations", tags=["Reservations"])
 
@@ -29,17 +30,24 @@ def create_reservation(
             detail="Neispravan format datuma i vremena. Koristite ISO format.",
         )
 
+    if starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=timezone.utc)
+    if ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=timezone.utc)
+
     # Provjera valjanosti datuma
     if starts_at >= ends_at:
-        raise HTTPException(
+        raise AppException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Vrijeme završetka mora biti nakon vremena početka.",
+            code="INVALID_RESERVATION_TIME",
+            message="Vrijeme završetka mora biti nakon vremena početka.",
         )
 
     if starts_at < datetime.now(timezone.utc):
-        raise HTTPException(
+        raise AppException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Nije moguće rezervirati termin u prošlosti.",
+            code="RESERVATION_IN_PAST",
+            message="Nije moguće rezervirati termin u prošlosti.",
         )
 
     # Provjera postoji li motocikl i je li dostupan
@@ -48,9 +56,10 @@ def create_reservation(
         raise HTTPException(status_code=404, detail="Motocikl nije pronađen.")
     
     if motorcycle.status != MotorcycleStatus.AVAILABLE:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Motocikl trenutno nije dostupan za rezervaciju.",
+        raise AppException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="MOTORCYCLE_UNAVAILABLE",
+            message="Motocikl trenutno nije dostupan za rezervaciju.",
         )
 
     # Provjera preklapanja termina (postojeće potvrđene rezervacije za isti motocikl)
@@ -64,9 +73,10 @@ def create_reservation(
     ).first()
 
     if overlapping:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Motocikl je već rezerviran u odabranom terminu.",
+        raise AppException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="RESERVATION_CONFLICT",
+            message="Motocikl je već rezerviran u odabranom terminu.",
         )
 
     new_reservation = Reservation(
@@ -84,12 +94,15 @@ def create_reservation(
 
 @router.get("/", response_model=list[ReservationResponse])
 def get_my_reservations(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role.value == "admin":
-        return db.query(Reservation).all()
-    return db.query(Reservation).filter(Reservation.user_id == current_user.id).all()
+    query = db.query(Reservation)
+    if current_user.role.value != "admin":
+        query = query.filter(Reservation.user_id == current_user.id)
+    return query.order_by(Reservation.id).offset(offset).limit(limit).all()
 
 
 @router.patch("/{reservation_id}/cancel", response_model=ReservationResponse)
@@ -109,9 +122,10 @@ def cancel_reservation(
         )
 
     if reservation.status != ReservationStatus.CONFIRMED:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Ova rezervacija se više ne može otkazati.",
+        raise AppException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="RESERVATION_NOT_CANCELLABLE",
+            message="Ova rezervacija se više ne može otkazati.",
         )
 
     # Pravilo: Minimalni rok za otkazivanje je 3 sata prije početka
@@ -123,9 +137,10 @@ def cancel_reservation(
     now = datetime.now(timezone.utc)
 
     if now > time_limit:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Rezervaciju je moguće otkazati najkasnije 3 sata prije početka termina.",
+        raise AppException(
+            status_code=status.HTTP_409_CONFLICT,
+            code="CANCELLATION_DEADLINE_PASSED",
+            message="Rezervaciju je moguće otkazati najkasnije 3 sata prije početka termina.",
         )
 
     reservation.status = ReservationStatus.CANCELLED
